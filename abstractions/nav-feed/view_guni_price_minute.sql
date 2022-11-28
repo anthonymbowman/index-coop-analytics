@@ -1,3 +1,4 @@
+-- https://dune.com/queries/1631803
 -- The goal of this query is to calculate the price of a G-UNI Token
 /*
 1. Get the lowerTick, upperTick, liquidity, and Uniswap Pool Address of the position
@@ -10,7 +11,9 @@
 
 with
 
-position as (
+-- get the lowerTick, upperTick, and liquidity of the Arrakis Vault position on initialize and rebalance
+-- lowerTick and upperTick only change when during these events
+position_change as (
 select
     "call_block_time" as block_time,
     "call_block_number" as block_number,
@@ -35,6 +38,9 @@ from    gelato."GUniPool_evt_Rebalance"
 where   contract_address = '\x0D2A2Df39436b5c5f986552869124bA29b7Df1AC'
 ),
 
+-- get the sqrtPriceX96 after each swap in the Uniswap Pool that the Arrakis Vault is built on
+-- this allows us to calculate the amount of tokenA and tokenB of the Arrakis Vault during any point of its history given we known liquidity, lowerTick, and upperTick
+-- this allows us to calculate the price of a GUNI token if we know the price of tokenA and tokenB as well as the total supply of GUNI tokens
 swaps as (
 select 
     "evt_block_time" as block_time,
@@ -55,6 +61,9 @@ from    uniswap_v3."Pair_evt_Swap"
 where   "contract_address" = (select "uniPool" from gelato."GUniFactory_evt_PoolCreated" where "pool" = '\x0D2A2Df39436b5c5f986552869124bA29b7Df1AC')
 ),
 
+-- get the liquidity (liquidity delta) and guni_amount (guni delta) for mints and burns of GUNI tokens
+-- this allows us to calculate the liquidity attributable to the Arrakis Vault at any time when combined with the liquidity post-rebalance
+-- this allows us to track the amount of guni tokens in existence at any point
 guni_tokens as (
 select 
     "evt_block_time" as block_time,
@@ -90,14 +99,14 @@ from    (
             sum(case when l_tick is null then 0 else 1 end) over (order by block_number, index) as pos_part,
             liquidity
         from    (
-                select * from position
+                select * from position_change
                 union
                 select block_time, block_number, index, liquidity, null as l_tick, null as u_tick from guni_tokens
                 ) t0
         ) t1
 ),
 
-position_breakdown as (
+token_breakdown as (
 select
     block_time, block_number, index,
     l_tick, u_tick, liquidity, "sqrtPriceX96",
@@ -162,8 +171,8 @@ from    (
                     l_tick, u_tick, liquidity, "sqrtPriceX96",
                     token0_amount, token1_amount,
                     row_number() over (partition by d.day order by block_number desc, index desc) as rnb
-                from        (select generate_series(date_trunc('day', (select min(block_time) from position_breakdown)), date_trunc('day', now()), '1 day') as day) d
-                left join   position_breakdown pb on date_trunc('day', pb.block_time) = d.day
+                from        (select generate_series(date_trunc('day', (select min(block_time) from token_breakdown)), date_trunc('day', now()), '1 day') as day) d
+                left join   token_breakdown pb on date_trunc('day', pb.block_time) = d.day
                 ) t0
         where   rnb = 1
         ) t1
